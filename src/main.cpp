@@ -1,21 +1,26 @@
-#include <ota.h>
+#include <wifi_config.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 //#include <Adafruit_NeoPixel.h>
 
 //#include "colorconversion.h"
 
+
 #include "FastLED.h"
 
-
+#define SERIAL_VERBOSE
 #define SENSOR_UPDATE_RATE 1000
 #define MQTT_RECONNECT_RATE 5000
 
-#define PIXEL_PIN    D1    // Digital IO pin connected to the NeoPixels.
+#define PIXEL_PIN    1    // Digital IO pin connected to the NeoPixels.
 
 #define PIXEL_COUNT 61
 
-
+#define HOSTNAME "HK-RGBLight-"
 
 
 
@@ -26,6 +31,13 @@ long lastSensorUpdate = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
+
+bool setupDone = false;
+
+bool lampOn = false;
+float hue = 0.0;
+float saturation = 0.0;
+float brightness = 0.0;
 
 //Adafruit_NeoPixel strip = Adafruit_NeoPixel(PIXEL_COUNT, PIXEL_PIN, NEO_GRB + NEO_KHZ800);
 CRGB leds[PIXEL_COUNT];
@@ -39,7 +51,7 @@ CRGB leds[PIXEL_COUNT];
 //   }
 // }
 
-// void setAllPixels(uint32_t c) 
+// void setAllPixels(uint32_t c)
 // {
 //   for(uint16_t i=0; i<strip.numPixels(); i++) {
 //     strip.setPixelColor(i, c);
@@ -48,6 +60,7 @@ CRGB leds[PIXEL_COUNT];
 
 // }
 
+void callback(char* topic, byte* payload, unsigned int length) ;
 
 // Convert Hue/Saturation/Brightness values to a packed 32-bit RBG color.
 // hue must be a float value between 0 and 360
@@ -93,21 +106,27 @@ bool reconnect() {
 
   if(WiFi.status() == WL_CONNECTED) {
 
+    if(!setupDone) {
+      ArduinoOTA.setHostname((const char *)WiFi.hostname().c_str());
+      ArduinoOTA.begin();
+      client.setServer(mqtt_server, 1883);
+      client.setCallback(callback);
+
+      setupDone = true;
+    }
+
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
     if (client.connect((const char *)WiFi.hostname().c_str())) {
       Serial.println("connected");
-      // Once connected, publish an announcement...
-      client.publish("hello", (const char *)WiFi.hostname().c_str());
+
       // ... and resubscribe
-      client.subscribe("fairylight");
-      //client.subscribe("elro");
-      return true;
+      // client.subscribe("fairylight");
+      client.subscribe("light/#");
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
-      return false;
     }
 
   }
@@ -117,39 +136,85 @@ bool reconnect() {
 
 void callback(char* topic, byte* payload, unsigned int length) {
 
-  String sTopic = topic;
 
-  if(sTopic.equals("fairylight")) {
-    StaticJsonBuffer<200> jsonBuffer;
-    JsonObject& root = jsonBuffer.parseObject((char *)payload);
-    if (!root.success())
-    {
-      Serial.println("parseObject() failed");
-      return;
-    }
-    
-    float hue = root["hue"];
-    float sat = ((double)root["saturation"]);
-    float bright = ((double)root["brightness"]);
-    bool lightOn = root["powerOn"];
+  Serial.println(" ");
+  Serial.println(" ");
+  Serial.print("Received topic:\t");
+  Serial.println(topic);
+  Serial.print("Payload:\t");
+  Serial.print((char *)payload);
+  Serial.print("\tSize: ");
+  Serial.println(length);
+  Serial.println("--------");
+
+  String value;
+  for (int i = 0; i < length; i++) {
+    value += (char)payload[i];
+  }
+
+  char *lightString = strtok(topic, "/");
+  char *lampName = strtok(NULL, "/");
+  char *key = strtok(NULL, "/");
 
 
-    if(lightOn) {
-      CRGB color = HSVColor(hue, sat/100, bright/100);
+  Serial.print("Parsed main topic:\t");
+  Serial.println(lightString);
+  Serial.print("Parsed lamp name:\t");
+  Serial.println(lampName);
+  Serial.print("Parsed key:\t");
+  Serial.println(key);
+  Serial.print("Parsed value:\t");
+  Serial.println(value.c_str());
 
-      FastLED.showColor(color); 
+
+  if((strcmp(lightString, "light") != 0) ||
+  (strcmp(lampName, "living") != 0))   {
+    Serial.println("Wrong topic, skipping message");
+    return;
+  }
+
+  if(strcmp(key, "on") == 0 ) {
+    if(value.equals(String("true"))) {
+      lampOn = true;
     }
     else {
-      FastLED.showColor(CRGB::Black); 
+      Serial.println(value.c_str());
+      lampOn = false;
     }
-
-
-    
-    
-
+  }
+  else if(strcmp(key, "hue") == 0) {
+      hue = value.toFloat();
+  }
+  else if(strcmp(key, "saturation") == 0) {
+      saturation = value.toFloat();
+  }
+  else if(strcmp(key, "brightness") == 0) {
+      brightness = value.toFloat();
   }
 
 
+  if(lampOn) {
+    CRGB color = HSVColor(hue, saturation/100.0, brightness/100.0);
+
+    FastLED.showColor(color);
+
+    Serial.print("Setting color to hue: ");
+    Serial.print(hue);
+    Serial.print(" sat: ");
+    Serial.print(saturation/100.0);
+    Serial.print(" brightness: ");
+    Serial.println(brightness/100.0);
+    Serial.print("R: ");
+    Serial.print(color.red);
+    Serial.print("\tG: ");
+    Serial.print(color.green);
+    Serial.print("\tB: ");
+    Serial.println(color.blue);
+  }
+  else {
+    FastLED.showColor(CRGB::Black);
+    Serial.println("lamp off");
+  }
 
 }
 
@@ -157,20 +222,29 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 void setup()
 {
+
   Serial.begin(115200);
   //Internal LED
   pinMode(BUILTIN_LED, OUTPUT);
   digitalWrite(BUILTIN_LED, LOW);
 
   delay(100);
-  
-  setupOTA();
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
+
+  Serial.println("Setup started");
+
 
   //strip.begin();
   //colorWipe(strip.Color(255,255,255), 10);
   FastLED.addLeds<NEOPIXEL, PIXEL_PIN>(leds, PIXEL_COUNT);
+
+
+  String hostname(HOSTNAME);
+  hostname += String(ESP.getChipId(), HEX);
+  WiFi.hostname(hostname);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, wpa_key);
+
+  Serial.println("Setup finished");
 
 
 }
@@ -181,8 +255,8 @@ void loop()
 {
   now = millis();
   ArduinoOTA.handle();
- 
-  
+
+
   if (!client.connected()) {
     digitalWrite(BUILTIN_LED, LOW);
     if((now -lastReconnect) > MQTT_RECONNECT_RATE) {
@@ -194,19 +268,17 @@ void loop()
     digitalWrite(BUILTIN_LED, HIGH);
     client.loop();
 
-    if(now - lastSensorUpdate > SENSOR_UPDATE_RATE) {
-
-      lastSensorUpdate = now;
-
-
-
-    }
-
-
+    // if(now - lastSensorUpdate > SENSOR_UPDATE_RATE) {
+    //
+    //   lastSensorUpdate = now;
+    //
+    //
+    //
+    // }
 
   }
   delay(10);
 
-  
+
 
 }
